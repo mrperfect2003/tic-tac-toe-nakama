@@ -82,7 +82,7 @@ Make sure the following are installed:
 
 ```
 
-git clone [https://github.com/your-username/tic-tac-toe-nakama.git](https://github.com/your-username/tic-tac-toe-nakama.git)
+git clone [https://github.com/mrperfect2003/tic-tac-toe-nakama](https://github.com/your-username/tic-tac-toe-nakama.git)
 cd tic-tac-toe-nakama
 
 ```
