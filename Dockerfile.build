@@ -1,0 +1,11 @@
+FROM golang:1.26-alpine
+
+RUN apk add --no-cache build-base
+
+WORKDIR /app
+
+COPY . .
+
+RUN go mod tidy
+
+RUN go build -buildmode=plugin -o backend.so
