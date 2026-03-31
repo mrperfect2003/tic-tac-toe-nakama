@@ -114,6 +114,19 @@ docker compose up --build
 
 ## How It Works
 
+```
+
+Open Nakama Console
+
+Go to:
+
+http://localhost:7351
+
+Default login:
+
+username: admin
+password: password
+
 ### Match Creation
 
 Client calls RPC:
