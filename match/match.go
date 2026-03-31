@@ -8,13 +8,9 @@ import (
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
-// Match struct (REQUIRED by Nakama)
 type Match struct{}
 
-/*
----------------- MATCH INIT ----------------
-Called when match is created
-*/
+// MatchInit runs when a new authoritative match is created.
 func (m *Match) MatchInit(
 	ctx context.Context,
 	logger runtime.Logger,
@@ -31,13 +27,10 @@ func (m *Match) MatchInit(
 
 	logger.Info("Match initialized")
 
-	return state, 2, "" // 2 ticks/sec
+	return state, 2, ""
 }
 
-/*
----------------- JOIN ATTEMPT ----------------
-Allow or reject player
-*/
+// MatchJoinAttempt validates whether a player can join.
 func (m *Match) MatchJoinAttempt(
 	ctx context.Context,
 	logger runtime.Logger,
@@ -50,13 +43,16 @@ func (m *Match) MatchJoinAttempt(
 	metadata map[string]string,
 ) (interface{}, bool, string) {
 
-	return state, true, ""
+	s := state.(*GameState)
+
+	if len(s.Players) >= 2 {
+		return s, false, "match is full"
+	}
+
+	return s, true, ""
 }
 
-/*
----------------- JOIN ----------------
-Player enters match
-*/
+// MatchJoin adds player(s) to the match and broadcasts updated state.
 func (m *Match) MatchJoin(
 	ctx context.Context,
 	logger runtime.Logger,
@@ -71,7 +67,17 @@ func (m *Match) MatchJoin(
 	s := state.(*GameState)
 
 	for _, p := range presences {
-		s.Players = append(s.Players, p.GetUserId())
+		exists := false
+		for _, playerID := range s.Players {
+			if playerID == p.GetUserId() {
+				exists = true
+				break
+			}
+		}
+
+		if !exists {
+			s.Players = append(s.Players, p.GetUserId())
+		}
 	}
 
 	if len(s.Players) == 1 {
@@ -80,16 +86,24 @@ func (m *Match) MatchJoin(
 	}
 
 	if len(s.Players) == 2 {
+		s.Turn = s.Players[0]
 		s.Status = "playing"
 	}
+
+	stateBytes, err := json.Marshal(s)
+	if err != nil {
+		logger.Error("Failed to serialize state on join: %v", err)
+		return s
+	}
+
+	_ = dispatcher.BroadcastMessage(1, stateBytes, nil, nil, true)
+
+	logger.Info("Player joined. Players count: %d", len(s.Players))
 
 	return s
 }
 
-/*
----------------- GAME LOOP ----------------
-Handles moves
-*/
+// MatchLoop processes moves sent by players.
 func (m *Match) MatchLoop(
 	ctx context.Context,
 	logger runtime.Logger,
@@ -104,9 +118,17 @@ func (m *Match) MatchLoop(
 	s := state.(*GameState)
 
 	for _, msg := range messages {
+		if s.Status != "playing" {
+			continue
+		}
+
+		if s.Winner != "" {
+			continue
+		}
 
 		var data map[string]int
 		if err := json.Unmarshal(msg.GetData(), &data); err != nil {
+			logger.Error("Invalid move data: %v", err)
 			continue
 		}
 
@@ -114,45 +136,62 @@ func (m *Match) MatchLoop(
 		col := data["col"]
 		player := msg.GetUserId()
 
-		// turn validation
+		if row < 0 || row > 2 || col < 0 || col > 2 {
+			logger.Warn("Invalid position")
+			continue
+		}
+
 		if player != s.Turn {
+			logger.Warn("Not player's turn")
 			continue
 		}
 
-		// already filled
 		if s.Board[row][col] != "" {
+			logger.Warn("Cell already occupied")
 			continue
 		}
 
-		// assign symbol
 		symbol := "X"
-		if len(s.Players) > 1 && player != s.Players[0] {
+		if len(s.Players) > 1 && player == s.Players[1] {
 			symbol = "O"
 		}
 
 		s.Board[row][col] = symbol
 		s.MovesCount++
 
-		// switch turn
-		if len(s.Players) == 2 {
-			if player == s.Players[0] {
-				s.Turn = s.Players[1]
-			} else {
-				s.Turn = s.Players[0]
+		winnerSymbol := CheckWinner(s.Board)
+		if winnerSymbol != "" {
+			if winnerSymbol == "X" {
+				s.Winner = s.Players[0]
+			} else if len(s.Players) > 1 {
+				s.Winner = s.Players[1]
+			}
+			s.Status = "finished"
+		} else if s.MovesCount == 9 {
+			s.Status = "finished"
+		} else {
+			if len(s.Players) == 2 {
+				if player == s.Players[0] {
+					s.Turn = s.Players[1]
+				} else {
+					s.Turn = s.Players[0]
+				}
 			}
 		}
 
-		stateBytes, _ := json.Marshal(s)
+		stateBytes, err := json.Marshal(s)
+		if err != nil {
+			logger.Error("Failed to serialize state: %v", err)
+			continue
+		}
 
-		dispatcher.BroadcastMessage(1, stateBytes, nil, nil, true)
+		_ = dispatcher.BroadcastMessage(1, stateBytes, nil, nil, true)
 	}
 
 	return s
 }
 
-/*
----------------- LEAVE ----------------
-*/
+// MatchLeave handles player leaving.
 func (m *Match) MatchLeave(
 	ctx context.Context,
 	logger runtime.Logger,
@@ -163,12 +202,35 @@ func (m *Match) MatchLeave(
 	state interface{},
 	presences []runtime.Presence,
 ) interface{} {
-	return state
+
+	s := state.(*GameState)
+
+	for _, p := range presences {
+		filtered := make([]string, 0, len(s.Players))
+		for _, playerID := range s.Players {
+			if playerID != p.GetUserId() {
+				filtered = append(filtered, playerID)
+			}
+		}
+		s.Players = filtered
+	}
+
+	if len(s.Players) == 0 {
+		s.Status = "finished"
+	} else if len(s.Players) == 1 {
+		s.Status = "waiting"
+		s.Turn = s.Players[0]
+	}
+
+	stateBytes, err := json.Marshal(s)
+	if err == nil {
+		_ = dispatcher.BroadcastMessage(1, stateBytes, nil, nil, true)
+	}
+
+	return s
 }
 
-/*
----------------- TERMINATE ----------------
-*/
+// MatchTerminate handles cleanup.
 func (m *Match) MatchTerminate(
 	ctx context.Context,
 	logger runtime.Logger,
@@ -182,9 +244,7 @@ func (m *Match) MatchTerminate(
 	return state
 }
 
-/*
----------------- SIGNAL ----------------
-*/
+// MatchSignal handles external signals.
 func (m *Match) MatchSignal(
 	ctx context.Context,
 	logger runtime.Logger,
